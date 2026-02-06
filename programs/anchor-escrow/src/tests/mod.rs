@@ -3,36 +3,16 @@ mod tests {
 
     use {
         anchor_lang::{
-            prelude::msg, 
-            solana_program::program_pack::Pack, 
-            AccountDeserialize, 
-            InstructionData, 
-            ToAccountMetas
+            AccountDeserialize, InstructionData, Key, ToAccountMetas, prelude::{msg, Clock}, solana_program::{ program_pack::Pack}
         }, anchor_spl::{
             associated_token::{
                 self, 
                 spl_associated_token_account
             }, 
             token::spl_token
-        }, 
-        litesvm::LiteSVM, 
-        litesvm_token::{
-            spl_token::ID as TOKEN_PROGRAM_ID, 
-            CreateAssociatedTokenAccount, 
-            CreateMint, MintTo
-        }, 
-        solana_rpc_client::rpc_client::RpcClient,
-        solana_account::Account,
-        solana_instruction::Instruction, 
-        solana_keypair::Keypair, 
-        solana_message::Message, 
-        solana_native_token::LAMPORTS_PER_SOL, 
-        solana_pubkey::Pubkey, 
-        solana_sdk_ids::system_program::ID as SYSTEM_PROGRAM_ID, 
-        solana_signer::Signer, 
-        solana_transaction::Transaction, 
-        solana_address::Address, 
-        std::{
+        }, litesvm::{LiteSVM, types::TransactionMetadata}, litesvm_token::{
+            CreateAssociatedTokenAccount, CreateMint, MintTo, spl_token::ID as TOKEN_PROGRAM_ID
+        }, solana_account::{Account, ReadableAccount}, solana_address::Address, solana_instruction::Instruction, solana_keypair::Keypair, solana_message::Message, solana_native_token::LAMPORTS_PER_SOL, solana_pubkey::Pubkey, solana_rpc_client::rpc_client::RpcClient, solana_sdk_ids::system_program::ID as SYSTEM_PROGRAM_ID, solana_signer::Signer, solana_transaction::Transaction, std::{
             path::PathBuf, 
             str::FromStr
         }
@@ -64,7 +44,7 @@ mod tests {
         // LiteSVM does not have access to real Solana network data since it does not have network access,
         // so we use an RPC client to fetch account data from devnet
         let rpc_client = RpcClient::new("https://api.devnet.solana.com");
-        let account_address = Address::from_str("DRYvf71cbF2s5wgaJQvAGkghMkRcp5arvsK2w97vXhi2").unwrap();
+        let account_address = Address::from_str("4YH9pgaC1a9Ff4m7Z1nCViExVLn9goV4ybqWEPaQxY27").unwrap();
         let fetched_account = rpc_client
             .get_account(&account_address)
             .expect("Failed to fetch account from devnet");
@@ -84,14 +64,9 @@ mod tests {
         // Return the LiteSVM instance and payer keypair
         (program, payer)
     }
+    fn make_init(mut program: &mut LiteSVM, payer: &Keypair) -> (Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, TransactionMetadata) {
 
-    #[test]
-    fn test_make() {
-
-        // Setup the test environment by initializing LiteSVM and creating a payer keypair
-        let (mut program, payer) = setup();
-
-        // Get the maker's public key from the payer keypair
+        // Get the maker's public key from the payer keypairß
         let maker = payer.pubkey();
         
         // Create two mints (Mint A and Mint B) with 6 decimal places and the maker as the authority
@@ -128,7 +103,7 @@ mod tests {
         msg!("Vault PDA: {}\n", vault);
 
         // Define program IDs for associated token program, token program, and system program
-        let asspciated_token_program = spl_associated_token_account::ID;
+        let associated_token_program = spl_associated_token_account::ID;
         let token_program = TOKEN_PROGRAM_ID;
         let system_program = SYSTEM_PROGRAM_ID;
 
@@ -147,7 +122,7 @@ mod tests {
                 maker_ata_a: maker_ata_a,
                 escrow: escrow,
                 vault: vault,
-                associated_token_program: asspciated_token_program,
+                associated_token_program: associated_token_program,
                 token_program: token_program,
                 system_program: system_program,
             }.to_account_metas(None),
@@ -163,6 +138,16 @@ mod tests {
         // Send the transaction and capture the result
         let tx = program.send_transaction(transaction).unwrap();
 
+        (maker,mint_a,mint_b,maker_ata_a,escrow,vault,tx)
+        
+    }
+
+    #[test]
+    fn test_make() {
+
+        // Setup the test environment by initializing LiteSVM and creating a payer keypair
+        let(mut program,payer)=setup();
+        let(maker,mint_a,mint_b,maker_ata_a,escrow,vault,tx)=make_init(&mut program,&payer);
         // Log transaction details
         msg!("\n\nMake transaction sucessfull");
         msg!("CUs Consumed: {}", tx.compute_units_consumed);
@@ -183,6 +168,221 @@ mod tests {
         assert_eq!(escrow_data.mint_b, mint_b);
         assert_eq!(escrow_data.receive, 10);
         
+    }
+    #[test]
+    fn refund(){
+        let (mut program, payer) = setup();
+        let(maker,mint_a,mint_b,maker_ata_a,escrow,vault,_)=make_init(&mut program,&payer);
+        let associated_token_program = spl_associated_token_account::ID;
+        let token_program = TOKEN_PROGRAM_ID;
+        let system_program = SYSTEM_PROGRAM_ID;
+
+    let refund_ix=Instruction{
+        program_id:PROGRAM_ID,
+        accounts:crate::accounts::Refund{
+            maker:maker,
+            mint_a:mint_a,
+            maker_ata_a:maker_ata_a,
+            escrow:escrow,
+            vault:vault,
+            token_program:token_program,
+            system_program:system_program,
+        }.to_account_metas(None),
+        data:crate::instruction::Refund{}.data(),   
+    };
+    let message = Message::new(&[refund_ix], Some(&maker));
+        let recent_blockhash = program.latest_blockhash();
+
+        let transaction = Transaction::new(&[&payer], message, recent_blockhash);
+
+        let tx = program.send_transaction(transaction).unwrap();
+        
+        msg!("\n\nTake transaction sucessfull");
+        msg!("CUs Consumed: {}", tx.compute_units_consumed);
+        msg!("Tx Signature: {}", tx.signature);
+
+        // After refund, vault and escrow should be closed (no lamports), and maker regains full Mint A balance
+        assert_eq!(program.get_account(&vault).unwrap().lamports, 0);
+        assert_eq!(program.get_account(&escrow).unwrap().lamports(), 0);
+
+        let maker_ata_a_account = program.get_account(&maker_ata_a).unwrap();
+        let maker_ata_a_data = spl_token::state::Account::unpack(&maker_ata_a_account.data).unwrap();
+        assert_eq!(maker_ata_a_data.amount, 1_000_000_000);
+        assert_eq!(maker_ata_a_data.mint, mint_a);
+        assert_eq!(maker_ata_a_data.owner, maker);
+    }
+    #[test]
+    fn test_take(){
+        let (mut program, payer) = setup();
+        let taker = Keypair::new();
+        program.airdrop(&taker.pubkey(), 10 * LAMPORTS_PER_SOL).expect("airdrop taker");
+        let(maker,mint_a,mint_b,maker_ata_a,escrow,vault,_)=make_init(&mut program,&payer);
+
+        let taker_ata_a=CreateAssociatedTokenAccount::new(&mut program, &taker, &mint_a)
+            .owner(&taker.pubkey()).send().unwrap();
+        msg!("Taker ATA A: {}\n", taker_ata_a);
+
+        let taker_ata_b=CreateAssociatedTokenAccount::new(&mut program, &taker, &mint_b)
+            .owner(&taker.pubkey()).send().unwrap();
+        msg!("Taker ATA B: {}\n", taker_ata_b);
+
+        let maker_ata_b=CreateAssociatedTokenAccount::new(&mut program, &payer, &mint_b)
+            .owner(&maker).send().unwrap();
+        msg!("Maker ATA B: {}\n", maker_ata_b);
+
+        let associated_token_program = spl_associated_token_account::ID;
+        let token_program = TOKEN_PROGRAM_ID;
+        let system_program = SYSTEM_PROGRAM_ID;
+
+
+        // Mint 1,000 tokens (with 6 decimal places) of Mint A to the maker's associated token account
+        MintTo::new(&mut program, &payer, &mint_b, &taker_ata_b, 1000000000)
+            .send()
+            .unwrap();
+
+            let take_ix=Instruction{
+                program_id:PROGRAM_ID,
+                accounts:crate::accounts::Take{
+                    taker:taker.pubkey(),
+                    maker:maker,
+                    mint_a:mint_a,
+                    mint_b:mint_b,
+                    taker_ata_a:taker_ata_a,
+                    taker_ata_b:taker_ata_b,
+                    maker_ata_b:maker_ata_b,
+                    escrow:escrow,
+                    vault:vault,
+                    associated_token_program:associated_token_program,
+                    token_program:token_program,
+                    system_program:system_program,
+                }.to_account_metas(None),
+                data:crate::instruction::Take{}.data(),
+            };
+
+        let message = Message::new(&[take_ix], Some(&taker.pubkey()));
+        let recent_blockhash = program.latest_blockhash();
+
+        let transaction = Transaction::new(&[&taker], message, recent_blockhash);
+
+        let tx = program.send_transaction(transaction).unwrap();
+        
+        msg!("\n\nTake transaction sucessfull");
+        msg!("CUs Consumed: {}", tx.compute_units_consumed);
+        msg!("Tx Signature: {}", tx.signature);
+
+        let vault_account = program.get_account(&vault);
+        assert!(vault_account.is_none(), "vault should be closed after take");
+
+        let taker_ata_a_account = program.get_account(&taker_ata_a).unwrap();
+        let taker_ata_a_data = spl_token::state::Account::unpack(&taker_ata_a_account.data).unwrap();
+        assert_eq!(taker_ata_a_data.amount, 10, "taker should have received 10 of Mint A");
+        assert_eq!(taker_ata_a_data.mint, mint_a);
+        assert_eq!(taker_ata_a_data.owner, taker.pubkey());
+
+        let taker_ata_b_account = program.get_account(&taker_ata_b).unwrap();
+        let taker_ata_b_data = spl_token::state::Account::unpack(&taker_ata_b_account.data).unwrap();
+        assert_eq!(taker_ata_b_data.amount, 1_000_000_000 - 10, "taker should have sent 10 of Mint B");
+        assert_eq!(taker_ata_b_data.mint, mint_b);
+        assert_eq!(taker_ata_b_data.owner, taker.pubkey());
+
+        let maker_ata_b_account = program.get_account(&maker_ata_b).unwrap();
+        let maker_ata_b_data = spl_token::state::Account::unpack(&maker_ata_b_account.data).unwrap();
+        assert_eq!(maker_ata_b_data.amount, 10, "maker should have received 10 of Mint B");
+        assert_eq!(maker_ata_b_data.mint, mint_b);
+        assert_eq!(maker_ata_b_data.owner, maker);
+    }
+     
+    
+    #[test]
+    fn test_take_after_5days(){
+        let (mut program, payer) = setup();
+        let taker = Keypair::new();
+        program.airdrop(&taker.pubkey(), 10 * LAMPORTS_PER_SOL).expect("airdrop taker");
+        let(maker,mint_a,mint_b,maker_ata_a,escrow,vault,_)=make_init(&mut program,&payer);
+
+        let taker_ata_a=CreateAssociatedTokenAccount::new(&mut program, &taker, &mint_a)
+            .owner(&taker.pubkey()).send().unwrap();
+        msg!("Taker ATA A: {}\n", taker_ata_a);
+
+        let taker_ata_b=CreateAssociatedTokenAccount::new(&mut program, &taker, &mint_b)
+            .owner(&taker.pubkey()).send().unwrap();
+        msg!("Taker ATA B: {}\n", taker_ata_b);
+
+        let maker_ata_b=CreateAssociatedTokenAccount::new(&mut program, &payer, &mint_b)
+            .owner(&maker).send().unwrap();
+        msg!("Maker ATA B: {}\n", maker_ata_b);
+
+        let associated_token_program = spl_associated_token_account::ID;
+        let token_program = TOKEN_PROGRAM_ID;
+        let system_program = SYSTEM_PROGRAM_ID;
+
+        // Move the clock forward by 5 days and assert the change
+        let mut clock: Clock = program.get_sysvar();
+        let original_time = clock.unix_timestamp;
+        let future_time_after_5days = original_time + 5 * 24 * 60 * 60;
+        clock.unix_timestamp = future_time_after_5days;
+        program.set_sysvar(&clock);
+
+        let updated_clock: Clock = program.get_sysvar();
+        assert!(
+            updated_clock.unix_timestamp >= future_time_after_5days,
+            "clock should be at least 5 days in the future"
+        );
+
+        // Mint 1,000 tokens (with 6 decimal places) of Mint A to the maker's associated token account
+        MintTo::new(&mut program, &payer, &mint_b, &taker_ata_b, 1000000000)
+            .send()
+            .unwrap();
+
+            let take_ix=Instruction{
+                program_id:PROGRAM_ID,
+                accounts:crate::accounts::Take{
+                    taker:taker.pubkey(),
+                    maker:maker,
+                    mint_a:mint_a,
+                    mint_b:mint_b,
+                    taker_ata_a:taker_ata_a,
+                    taker_ata_b:taker_ata_b,
+                    maker_ata_b:maker_ata_b,
+                    escrow:escrow,
+                    vault:vault,
+                    associated_token_program:associated_token_program,
+                    token_program:token_program,
+                    system_program:system_program,
+                }.to_account_metas(None),
+                data:crate::instruction::Take{}.data(),
+            };
+
+        let message = Message::new(&[take_ix], Some(&taker.pubkey()));
+        let recent_blockhash = program.latest_blockhash();
+
+        let transaction = Transaction::new(&[&taker], message, recent_blockhash);
+
+        let tx = program.send_transaction(transaction).unwrap();
+        
+        msg!("\n\nTake transaction sucessfull");
+        msg!("CUs Consumed: {}", tx.compute_units_consumed);
+        msg!("Tx Signature: {}", tx.signature);
+        
+        let vault_account = program.get_account(&vault);
+        assert!(vault_account.is_none(), "vault should be closed after delayed take");
+
+        let taker_ata_a_account = program.get_account(&taker_ata_a).unwrap();
+        let taker_ata_a_data = spl_token::state::Account::unpack(&taker_ata_a_account.data).unwrap();
+        assert_eq!(taker_ata_a_data.amount, 10);
+        assert_eq!(taker_ata_a_data.mint, mint_a);
+        assert_eq!(taker_ata_a_data.owner, taker.pubkey());
+
+        let taker_ata_b_account = program.get_account(&taker_ata_b).unwrap();
+        let taker_ata_b_data = spl_token::state::Account::unpack(&taker_ata_b_account.data).unwrap();
+        assert_eq!(taker_ata_b_data.mint, mint_b);
+        assert_eq!(taker_ata_b_data.owner, taker.pubkey());
+
+        let maker_ata_b_account = program.get_account(&maker_ata_b).unwrap();
+        let maker_ata_b_data = spl_token::state::Account::unpack(&maker_ata_b_account.data).unwrap();
+        assert_eq!(maker_ata_b_data.amount, 10);
+        assert_eq!(maker_ata_b_data.mint, mint_b);
+        assert_eq!(maker_ata_b_data.owner, maker);
     }
 
 }

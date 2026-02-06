@@ -58,6 +58,9 @@ pub struct Take<'info> {
 //Close vault account
 impl<'info> Take<'info> {
     pub fn deposit(&mut self) -> Result<()> {
+        let current_time = Clock::get()?.unix_timestamp;
+        let deadline=5*24*60*60;//5 days in seconds
+        require!(current_time > deadline, TakeError::DeadlineNotReached);
         let cpi_program = self.token_program.to_account_info();
 
         let cpi_accounts = TransferChecked {
@@ -105,4 +108,10 @@ impl<'info> Take<'info> {
 
         close_account(cpi_context)
     }
+}
+
+#[error_code]
+pub enum TakeError {
+    #[msg("Deadline not reached")]
+    DeadlineNotReached,
 }
